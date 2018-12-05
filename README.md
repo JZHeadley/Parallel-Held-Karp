@@ -1,0 +1,2 @@
+# Parallel Held Karp
+The Sequential version of the Held-Karp algorithm takes $O(2^n\sqrt{2})$ our parallel implementation should take something around $O(n^2\log({n}))$ by performing the calculations for each 'layer' of the traveling salesman graph in parallel.
