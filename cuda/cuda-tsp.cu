@@ -3,6 +3,7 @@
 #include <math.h>
 #include <string>
 #include <vector>
+#include <map>
 using namespace std;
 
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
@@ -13,11 +14,17 @@ typedef struct
 	double x;
 	double y;
 } City;
+typedef struct
+{
+	double cost;
+	vector<int> path;
+} PathCost;
 
 void printDistanceMatrix(float*h_distances, int numCities, int numFeatures);
 double fRand(double fMin, double fMax);
 vector<City> generateCities(int numCities, int gridDimX, int gridDimY);
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort = true);
+void genKey(vector<int> set, int z, long long &key);
 
 __global__ void computeDistances(int numInstances, int numAttributes, float* dataset, float* distances)
 {
@@ -84,27 +91,83 @@ __global__ void findPermutations(char* permutationsOfK, int k, unsigned long lon
 	}
 }
 
+vector<City> tsp(vector<City> cities, int numCities, float* distances, float* d_distances)
+{
+
+	cudaEvent_t permutationsStart, permutationsStop;
+	cudaEventCreate(&permutationsStart);
+	cudaEventCreate(&permutationsStop);
+	float permutationMilliseconds = 0;
+	long long key = 0x00000;
+	map<long long int, PathCost> solutionsMap;
+	// calculate the highest layer number so we know how large we need to be for our permutation storage at worst
+	int k = numCities % 2 == 0 ? numCities / 2 : (ceil(numCities / 2));
+	// initalize first 2 levels of the lookup table
+	for (int i = 1; i < numCities; i++)
+	{
+		for (int j = 1; j < numCities; j++)
+		{
+			if (i == j)
+				continue;
+			vector<int> iSet
+			{ i };
+			genKey(iSet, j, key);
+			PathCost pathCost;
+			vector<int> path
+			{ 0, i };
+			pathCost.path = path;
+			pathCost.cost = distances[i * numCities + j] + distances[0 + i];
+			solutionsMap.insert(pair<long long, PathCost>(key, pathCost));
+		}
+	}
+	double currentcost = 0;
+	char* d_permutationsOfK;
+	char *h_permutationsOfK = (char*) malloc(pow(2, numCities) * sizeof(char) * k);
+	gpuErrchk(cudaMalloc(&d_permutationsOfK, pow(2, numCities) * sizeof(char) * k));
+
+	unsigned long long finalPos;
+	unsigned long long numPossibilities = pow(2, numCities); // - pow(2, k - 1);
+	int threadsPerBlock = 1024;
+	unsigned long long blocksPerGrid = ((numPossibilities) + threadsPerBlock - 1) / threadsPerBlock;
+	for (int i = 2; i < numCities; i++)
+	{
+		cudaEventRecord(permutationsStart);
+
+		findPermutations<<<blocksPerGrid, threadsPerBlock, 0>>>(d_permutationsOfK, i, (unsigned long long) (pow(2, i) - 1),
+				(unsigned long long) pow(2, numCities));
+//		cudaDeviceSynchronize();
+		gpuErrchk(cudaMemcpyFromSymbol(&finalPos, curPosition, sizeof(unsigned long long), 0, cudaMemcpyDeviceToHost));
+		gpuErrchk(cudaMemcpy(h_permutationsOfK, d_permutationsOfK, finalPos * sizeof(char) * i, cudaMemcpyDeviceToHost));
+
+		cudaEventRecord(permutationsStop);
+		cudaEventSynchronize(permutationsStop);
+		cudaEventElapsedTime(&permutationMilliseconds, permutationsStart, permutationsStop);
+		printf("%i choose %i is %llu and took %f ms\n", numCities, i, finalPos, permutationMilliseconds);
+
+		// use the permutations we generated here
+		// remember the permutations are stored in k length 'arrays' within the 1-D array we have them in
+		// so we need to index them interestingly.
+	}
+	return cities;
+}
 int main(void)
 {
 	float* d_distances;
 	float* h_distances;
 	float* h_dataset;
 	float* d_dataset;
-	char* d_permutationsOfK;
 
 	int numCities = 13;
 	int numFeatures = 3;
 	int k = numCities % 2 == 0 ? numCities / 2 : (ceil(numCities / 2));
 
-	cudaEvent_t allStart, allStop, distStart, distStop, permutationsStart, permutationsStop;
+	cudaEvent_t allStart, allStop, distStart, distStop;
 	cudaEventCreate(&allStart);
 	cudaEventCreate(&allStop);
 	cudaEventCreate(&distStart);
 	cudaEventCreate(&distStop);
-	cudaEventCreate(&permutationsStart);
-	cudaEventCreate(&permutationsStop);
 
-	float allMilliseconds = 0, distMilliseconds = 0, permutationMilliseconds = 0;
+	float allMilliseconds = 0, distMilliseconds = 0;
 
 	vector<City> cities = generateCities(numCities, 500, 500);
 
@@ -134,50 +197,53 @@ int main(void)
 	gpuErrchk(cudaMemcpy(h_distances, d_distances, numCities * numCities * sizeof(float), cudaMemcpyDeviceToHost));
 	cudaEventRecord(distStop);
 	cudaEventSynchronize(distStop);
-	threadsPerBlock = 1024;
-	int numPossibilities = pow(2, numCities); // - pow(2, k - 1);
-	blocksPerGrid = ((numPossibilities) + threadsPerBlock - 1) / threadsPerBlock;
 
 	gpuErrchk(cudaFree(d_dataset));
-	cudaEventRecord(permutationsStart);
-	gpuErrchk(cudaMalloc(&d_permutationsOfK, pow(2, numCities) * sizeof(char) * k));
-	char *h_permutationsOfK = (char*) malloc(pow(2, 29) * sizeof(char) * k);
 
-	for (int i = 1; i <= numCities; i++)
-	{
-		findPermutations<<<blocksPerGrid, threadsPerBlock, 0>>>(d_permutationsOfK, i, (unsigned long long) (pow(2, i) - 1),
-				(unsigned long long) pow(2, numCities));
-		unsigned long long finalPos;
-		cudaDeviceSynchronize();
-		gpuErrchk(cudaMemcpyFromSymbol(&finalPos, curPosition, sizeof(unsigned long long), 0, cudaMemcpyDeviceToHost));
-//		finalPos++;
-		gpuErrchk(cudaMemcpy(h_permutationsOfK, d_permutationsOfK, finalPos * sizeof(char) * i, cudaMemcpyDeviceToHost));
+	vector<City> solution = tsp(cities, numCities, h_distances, d_distances);
 
-		printf("%i choose %i is %llu\n", numCities, i, finalPos);
-//		printf("permutations for size %i\n", i);
-//		for (int j = 0; j < finalPos; j++)
-//		{
-//			for (int z = 0; z < i; z++)
-//			{
-//				printf("%i\t", (int) h_permutationsOfK[j * i + z]);
-//			}
-//			printf("\n");
-//		}
-
-	}
+//	threadsPerBlock = 1024;
+//	int numPossibilities = pow(2, numCities); // - pow(2, k - 1);
+//	blocksPerGrid = ((numPossibilities) + threadsPerBlock - 1) / threadsPerBlock;
+//
+//	gpuErrchk(cudaFree(d_dataset));
+//	cudaEventRecord(permutationsStart);
+//	gpuErrchk(cudaMalloc(&d_permutationsOfK, pow(2, numCities) * sizeof(char) * k));
+//	char *h_permutationsOfK = (char*) malloc(pow(2, 29) * sizeof(char) * k);
+//
+//	for (int i = 1; i <= numCities; i++)
+//	{
+//		findPermutations<<<blocksPerGrid, threadsPerBlock, 0>>>(d_permutationsOfK, i, (unsigned long long) (pow(2, i) - 1),
+//				(unsigned long long) pow(2, numCities));
+//		unsigned long long finalPos;
+//		cudaDeviceSynchronize();
+//		gpuErrchk(cudaMemcpyFromSymbol(&finalPos, curPosition, sizeof(unsigned long long), 0, cudaMemcpyDeviceToHost));
+////		finalPos++;
+//		gpuErrchk(cudaMemcpy(h_permutationsOfK, d_permutationsOfK, finalPos * sizeof(char) * i, cudaMemcpyDeviceToHost));
+//
+//		printf("%i choose %i is %llu\n", numCities, i, finalPos);
+////		printf("permutations for size %i\n", i);
+////		for (int j = 0; j < finalPos; j++)
+////		{
+////			for (int z = 0; z < i; z++)
+////			{
+////				printf("%i\t", (int) h_permutationsOfK[j * i + z]);
+////			}
+////			printf("\n");
+////		}
+//
+//	}
 	gpuErrchk(cudaPeekAtLastError());
-	cudaEventRecord(permutationsStop);
-	cudaEventSynchronize(permutationsStop);
-	cudaDeviceSynchronize();
+//	cudaDeviceSynchronize();
 
 	cudaEventRecord(allStop);
 	cudaEventSynchronize(allStop);
 	cudaEventElapsedTime(&distMilliseconds, distStart, distStop);
-	cudaEventElapsedTime(&permutationMilliseconds, permutationsStart, permutationsStop);
+
 	cudaEventElapsedTime(&allMilliseconds, allStart, allStop);
 
 	printf("The distance calculation for %i cities took %llu ms.\n", numCities, (long long unsigned int) distMilliseconds);
-	printf("The permutations calculation for %i cities took %llu ms.\n", numCities, (long long unsigned int) permutationMilliseconds);
+//	printf("The permutations calculation for %i cities took %llu ms.\n", numCities, (long long unsigned int) permutationMilliseconds);
 	printf("The salesman traversed %i cities in %llu ms.\n", numCities, (long long unsigned int) allMilliseconds);
 
 	cudaFreeHost(h_dataset);
@@ -230,4 +296,14 @@ vector<City> generateCities(int numCities, int gridDimX, int gridDimY)
 		id++;
 	}
 	return cities;
+}
+
+void genKey(vector<int> set, int z, long long &key)
+{
+	key = 0;
+	key |= z;
+	for (int j : set)
+	{
+		key |= (1 << (j + 8));
+	}
 }
