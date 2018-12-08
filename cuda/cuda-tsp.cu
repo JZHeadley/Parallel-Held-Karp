@@ -3,11 +3,7 @@
 #include <math.h>
 #include <string>
 #include <vector>
-#include <thrust/host_vector.h>
-#include <thrust/device_vector.h>
-#include <thrust/copy.h>
 using namespace std;
-using namespace thrust;
 
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 
@@ -42,9 +38,9 @@ __global__ void computeDistances(int numInstances, int numAttributes, float* dat
 	}
 }
 
-__device__ unsigned int countNumBits(int n)
+__device__ unsigned long long countNumBits(unsigned long long n)
 {
-	unsigned int count = 0;
+	unsigned long long count = 0;
 	while (n)
 	{
 		count += n & 1;
@@ -53,37 +49,38 @@ __device__ unsigned int countNumBits(int n)
 	return count;
 }
 
-__device__ unsigned long long curPosition;
+__device__ unsigned long long curPosition = 0;
 __global__ void findPermutations(char* permutationsOfK, int k, unsigned long long lowerBound, unsigned long long upperBound)
 {
 	curPosition = 0;
-	int tid = blockDim.x * blockIdx.x + threadIdx.x;
-	int numToCheck = lowerBound + tid;
-	unsigned int count = 0;
-	unsigned int curBitPosition = 0;
+	unsigned long long tid = blockDim.x * blockIdx.x + threadIdx.x;
+	unsigned long long numToCheck = lowerBound + tid;
+	unsigned long long count = 0;
+	unsigned long long curBitPosition = 0;
 	if (numToCheck < upperBound)
 	{
-		while (numToCheck)
+
+		if (countNumBits(numToCheck) == k)
 		{
-			if (numToCheck & 1)
+			__syncthreads();
+			unsigned long long added = atomicAdd(&curPosition, 1);
+			if (k == 1)
 			{
-				atomicAdd(&curPosition, (float) 1);
-				int permutationStartPos = curPosition * k;
-				permutationsOfK[permutationStartPos + count] = curBitPosition;
-				count++;
+				printf("found a permutation %llu\n", added);
 			}
-			n >>= 1;
-			curBitPosition++;
+			unsigned long long permutationStartPos = (added) * (unsigned long long) k;
+			while (numToCheck)
+			{
+				if (numToCheck & 1)
+				{
+					permutationsOfK[permutationStartPos + count] = curBitPosition;
+					count++;
+				}
+				numToCheck >>= 1;
+				curBitPosition++;
+			}
+
 		}
-//		if (countNumBits(numToCheck) == k)
-//		{
-//			atomicAdd(&curPosition, (float) 1);
-//			int curIndex = curPosition * k;
-//			for (int i = 0; i < k; i++)
-//			{
-//				permutationsOfK[curIndex + i] = tid;
-//			}
-//		}
 	}
 }
 
@@ -93,9 +90,9 @@ int main(void)
 	float* h_distances;
 	float* h_dataset;
 	float* d_dataset;
-	char* d_permutations_of_k;
+	char* d_permutationsOfK;
 
-	int numCities = 6;
+	int numCities = 13;
 	int numFeatures = 3;
 	int k = numCities % 2 == 0 ? numCities / 2 : (ceil(numCities / 2));
 
@@ -137,44 +134,50 @@ int main(void)
 	gpuErrchk(cudaMemcpy(h_distances, d_distances, numCities * numCities * sizeof(float), cudaMemcpyDeviceToHost));
 	cudaEventRecord(distStop);
 	cudaEventSynchronize(distStop);
-	threadsPerBlock = 256;
-	int numPossibilities = pow(2, numCities) - pow(2, k - 1);
+	threadsPerBlock = 1024;
+	int numPossibilities = pow(2, numCities); // - pow(2, k - 1);
 	blocksPerGrid = ((numPossibilities) + threadsPerBlock - 1) / threadsPerBlock;
 
 	gpuErrchk(cudaFree(d_dataset));
 	cudaEventRecord(permutationsStart);
-	gpuErrchk(cudaMalloc(&d_permutations_of_k, pow(2, 29) * sizeof(char) * k));
+	gpuErrchk(cudaMalloc(&d_permutationsOfK, pow(2, numCities) * sizeof(char) * k));
 	char *h_permutationsOfK = (char*) malloc(pow(2, 29) * sizeof(char) * k);
 
-	for (int i = 0; i < numCities; i++)
+	for (int i = 1; i <= numCities; i++)
 	{
-//		int i = 20;
-		findPermutations<<<blocksPerGrid, threadsPerBlock, 0>>>(d_permutations_of_k, i, pow(2, i) - 1, pow(2, numCities));
-//		unsigned long long finalPos;
-//		gpuErrchk(cudaMemcpyFromSymbol(&finalPos, curPosition, sizeof(unsigned long long), 0, cudaMemcpyDeviceToHost));
+		findPermutations<<<blocksPerGrid, threadsPerBlock, 0>>>(d_permutationsOfK, i, (unsigned long long) (pow(2, i) - 1),
+				(unsigned long long) pow(2, numCities));
+		unsigned long long finalPos;
+		cudaDeviceSynchronize();
+		gpuErrchk(cudaMemcpyFromSymbol(&finalPos, curPosition, sizeof(unsigned long long), 0, cudaMemcpyDeviceToHost));
 //		finalPos++;
-//		gpuErrchk(cudaMemcpy(h_permutationsOfK, d_permutations_of_k, pow(2, 29) * sizeof(char) * k, cudaMemcpyDeviceToHost));
-//
+		gpuErrchk(cudaMemcpy(h_permutationsOfK, d_permutationsOfK, finalPos * sizeof(char) * i, cudaMemcpyDeviceToHost));
+
+		printf("%i choose %i is %llu\n", numCities, i, finalPos);
+//		printf("permutations for size %i\n", i);
+//		for (int j = 0; j < finalPos; j++)
+//		{
+//			for (int z = 0; z < i; z++)
+//			{
+//				printf("%i\t", (int) h_permutationsOfK[j * i + z]);
+//			}
+//			printf("\n");
+//		}
+
 	}
 	gpuErrchk(cudaPeekAtLastError());
 	cudaEventRecord(permutationsStop);
 	cudaEventSynchronize(permutationsStop);
 	cudaDeviceSynchronize();
-	unsigned long long finalPos;
-	gpuErrchk(cudaMemcpyFromSymbol(&finalPos, curPosition, sizeof(unsigned long long), 0, cudaMemcpyDeviceToHost));
-	finalPos++;
-	printf("found %llu permutations\n", (unsigned long long) finalPos);
+
 	cudaEventRecord(allStop);
 	cudaEventSynchronize(allStop);
-
 	cudaEventElapsedTime(&distMilliseconds, distStart, distStop);
 	cudaEventElapsedTime(&permutationMilliseconds, permutationsStart, permutationsStop);
 	cudaEventElapsedTime(&allMilliseconds, allStart, allStop);
 
-	printf("%i choose %i is %i\n", numCities, k, (int) finalPos);
 	printf("The distance calculation for %i cities took %llu ms.\n", numCities, (long long unsigned int) distMilliseconds);
-	printf("The permutations calculation for %i cities with %i size subsets took %llu ms.\n", numCities, k,
-			(long long unsigned int) permutationMilliseconds);
+	printf("The permutations calculation for %i cities took %llu ms.\n", numCities, (long long unsigned int) permutationMilliseconds);
 	printf("The salesman traversed %i cities in %llu ms.\n", numCities, (long long unsigned int) allMilliseconds);
 
 	cudaFreeHost(h_dataset);
@@ -198,7 +201,7 @@ void printDistanceMatrix(float*h_distances, int numCities, int numFeatures)
 
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort)
 {
-	// https://stackoverflow.com/a/14038590
+// https://stackoverflow.com/a/14038590
 	if (code != cudaSuccess)
 	{
 		fprintf(stderr, "GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);

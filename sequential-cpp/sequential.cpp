@@ -81,6 +81,8 @@ void genKey(vector<int> set, int z, long long &key)
 
 vector<vector<int>> generateSubsets(int size, int n)
 {
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &start);
     int count = 0;
     vector<vector<int>> container;
     vector<int> row;
@@ -104,6 +106,9 @@ vector<vector<int>> generateSubsets(int size, int n)
             }
         }
     } while (prev_permutation(v.begin(), v.end()));
+    clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+    uint64_t diff = (1000000000L * (end.tv_sec - start.tv_sec) + end.tv_nsec - start.tv_nsec) / 1e6;
+    printf("It took %lu ms to generate all %i of the subsets of size %i\n",diff,container.size(),size);
     return container;
 }
 
@@ -151,7 +156,7 @@ void tsp(vector<City> cities, int start, int numCities)
                 double minCost = INT_MAX;
                 vector<int> minPath;
                 int bestM;
-                    counter++;
+                counter++;
                 // we initialized 2 levels earlier so this for loop will always be able to run.
                 for (int m : diff)
                 {
@@ -177,7 +182,7 @@ void tsp(vector<City> cities, int start, int numCities)
                 solutionsMap.insert(pair<long long, PathCost>(key, pathCost));
             }
         }
-        printf("we have %i subsets of size %i\n", counter, i);
+        // printf("we have %i subsets of size %i\n", counter, i);
     }
     double minCost = INT_MAX;
     vector<int> minPath;
