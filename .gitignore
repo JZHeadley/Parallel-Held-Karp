@@ -1,0 +1,5 @@
+sequential-tsp
+*.o
+cuda/a.out
+cuda/findPermutations.c
+sequential-cpp/datasets/*
