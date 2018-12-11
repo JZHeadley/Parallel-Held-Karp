@@ -61,7 +61,6 @@ __device__ unsigned long long countNumBits(unsigned long long n)
 __device__ unsigned long long curPosition = 0;
 __global__ void findPermutations(char* permutationsOfK, int k, unsigned long long lowerBound, unsigned long long upperBound)
 {
-	curPosition = 0;
 	unsigned long long tid = blockDim.x * blockIdx.x + threadIdx.x;
 	unsigned long long numToCheck = lowerBound + tid;
 	unsigned long long count = 0;
@@ -71,12 +70,7 @@ __global__ void findPermutations(char* permutationsOfK, int k, unsigned long lon
 
 		if (countNumBits(numToCheck) == k)
 		{
-			__syncthreads();
 			unsigned long long added = atomicAdd(&curPosition, 1);
-			if (k == 1)
-			{
-				printf("found a permutation %llu\n", added);
-			}
 			unsigned long long permutationStartPos = (added) * (unsigned long long) k;
 			while (numToCheck)
 			{
@@ -137,10 +131,12 @@ vector<City> tsp(vector<City> cities, int numCities, float* distances, float* d_
 	unsigned long long numPossibilities = pow(2, numCities); // - pow(2, k - 1);
 	int threadsPerBlock = 1024;
 	unsigned long long blocksPerGrid = ((numPossibilities) + threadsPerBlock - 1) / threadsPerBlock;
+	unsigned long long*curPosPtr;
+	gpuErrchk(cudaGetSymbolAddress((void** )&curPosPtr, curPosition));
 	for (int subsetSize = 2; subsetSize < numCities; subsetSize++)
 	{
 		cudaEventRecord(permutationsStart);
-
+		gpuErrchk(cudaMemset(curPosPtr, 0, sizeof(unsigned long long)));
 		findPermutations<<<blocksPerGrid, threadsPerBlock, 0>>>(d_permutationsOfK, subsetSize, (unsigned long long) (pow(2, subsetSize) - 1),
 				(unsigned long long) pow(2, numCities));
 //		cudaDeviceSynchronize();
@@ -172,8 +168,7 @@ vector<City> tsp(vector<City> cities, int numCities, float* distances, float* d_
 
 			for (int k : set)
 			{
-				vector<int> kSet
-				{ k };
+				vector<int> kSet{ k };
 				vector<int> diff;
 				set_difference(set.begin(), set.end(), kSet.begin(), kSet.end(), inserter(diff, diff.begin()));
 				double minCost = INT_MAX;
@@ -247,7 +242,7 @@ int main(void)
 	float* h_dataset;
 	float* d_dataset;
 
-	int numCities = 13;
+	int numCities = 16;
 	int numFeatures = 3;
 	int k = numCities % 2 == 0 ? numCities / 2 : (ceil(numCities / 2));
 
