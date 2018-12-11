@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include <algorithm>
+#include <iterator>
 #include <stdlib.h>
 #include <math.h>
 #include <string>
@@ -100,6 +102,12 @@ vector<City> tsp(vector<City> cities, int numCities, float* distances, float* d_
 	float permutationMilliseconds = 0;
 	long long key = 0x00000;
 	map<long long int, PathCost> solutionsMap;
+	vector<int> cityNums;
+	// convert cities back to integer array
+	for (int i = 1; i < numCities; i++)
+	{
+		cityNums.push_back(i);
+	}
 	// calculate the highest layer number so we know how large we need to be for our permutation storage at worst
 	int k = numCities % 2 == 0 ? numCities / 2 : (ceil(numCities / 2));
 	// initalize first 2 levels of the lookup table
@@ -120,7 +128,7 @@ vector<City> tsp(vector<City> cities, int numCities, float* distances, float* d_
 			solutionsMap.insert(pair<long long, PathCost>(key, pathCost));
 		}
 	}
-	double currentcost = 0;
+	double currentCost = 0;
 	char* d_permutationsOfK;
 	char *h_permutationsOfK = (char*) malloc(pow(2, numCities) * sizeof(char) * k);
 	gpuErrchk(cudaMalloc(&d_permutationsOfK, pow(2, numCities) * sizeof(char) * k));
@@ -129,27 +137,109 @@ vector<City> tsp(vector<City> cities, int numCities, float* distances, float* d_
 	unsigned long long numPossibilities = pow(2, numCities); // - pow(2, k - 1);
 	int threadsPerBlock = 1024;
 	unsigned long long blocksPerGrid = ((numPossibilities) + threadsPerBlock - 1) / threadsPerBlock;
-	for (int i = 2; i < numCities; i++)
+	for (int subsetSize = 2; subsetSize < numCities; subsetSize++)
 	{
 		cudaEventRecord(permutationsStart);
 
-		findPermutations<<<blocksPerGrid, threadsPerBlock, 0>>>(d_permutationsOfK, i, (unsigned long long) (pow(2, i) - 1),
+		findPermutations<<<blocksPerGrid, threadsPerBlock, 0>>>(d_permutationsOfK, subsetSize, (unsigned long long) (pow(2, subsetSize) - 1),
 				(unsigned long long) pow(2, numCities));
 //		cudaDeviceSynchronize();
 		gpuErrchk(cudaMemcpyFromSymbol(&finalPos, curPosition, sizeof(unsigned long long), 0, cudaMemcpyDeviceToHost));
-		gpuErrchk(cudaMemcpy(h_permutationsOfK, d_permutationsOfK, finalPos * sizeof(char) * i, cudaMemcpyDeviceToHost));
+		gpuErrchk(cudaMemcpy(h_permutationsOfK, d_permutationsOfK, finalPos * sizeof(char) * subsetSize, cudaMemcpyDeviceToHost));
 
 		cudaEventRecord(permutationsStop);
 		cudaEventSynchronize(permutationsStop);
 		cudaEventElapsedTime(&permutationMilliseconds, permutationsStart, permutationsStop);
-		printf("%i choose %i is %llu and took %f ms\n", numCities, i, finalPos, permutationMilliseconds);
+		printf("%i choose %i is %llu and took %f ms\n", numCities, subsetSize, finalPos, permutationMilliseconds);
 
 		// use the permutations we generated here
 		// remember the permutations are stored in k length 'arrays' within the 1-D array we have them in
 		// so we need to index them interestingly.
+		// converting to vector<vector<int>> so I don't have to rethink the logic at the current moment... definitely need to in the interests of speed
+		vector<vector<int>> subsets;
+		for (int pos = 0; pos < finalPos; pos++)
+		{
+			vector<int> permutation;
+			for (int l = 0; l < subsetSize; l++)
+			{
+				permutation.push_back(h_permutationsOfK[pos * subsetSize + l]);
+			}
+			subsets.push_back(permutation);
+		}
+		int counter = 0;
+		for (vector<int> set : subsets)
+		{
+
+			for (int k : set)
+			{
+				vector<int> kSet
+				{ k };
+				vector<int> diff;
+				set_difference(set.begin(), set.end(), kSet.begin(), kSet.end(), inserter(diff, diff.begin()));
+				double minCost = INT_MAX;
+				vector<int> minPath;
+				int bestM;
+				counter++;
+				// we initialized 2 levels earlier so this for loop will always be able to run.
+				for (int m : diff)
+				{
+					vector<int> mSet
+					{ m }; // need to generate the key for k-1
+					vector<int> noMoreM; // get rid of m because thats where we're going
+					set_difference(diff.begin(), diff.end(), mSet.begin(), mSet.end(), inserter(noMoreM, noMoreM.begin()));
+
+					genKey(noMoreM, m, key);
+					currentCost = solutionsMap[key].cost + distances[m * numCities + k];
+					if (currentCost < minCost)
+					{
+						minCost = currentCost;
+						minPath = solutionsMap[key].path;
+						bestM = m;
+					}
+				}
+				genKey(diff, k, key);
+
+				PathCost pathCost;
+				pathCost.cost = minCost;
+				minPath.push_back(bestM);
+				pathCost.path = minPath;
+				solutionsMap.insert(pair<long long, PathCost>(key, pathCost));
+			}
+		}
+		// printf("we have %i subsets of size %i\n", counter, i);
 	}
-	return cities;
+	double minCost = INT_MAX;
+	vector<int> minPath;
+	int bestM;
+	for (int m : cityNums)
+	{
+		vector<int> mSet
+		{ m }; // need to generate the key for k-1
+		vector<int> noMoreM; // get rid of m because thats where we're going
+		set_difference(cityNums.begin(), cityNums.end(), mSet.begin(), mSet.end(), inserter(noMoreM, noMoreM.begin()));
+
+		genKey(noMoreM, m, key);
+		currentCost = solutionsMap[key].cost + distances[m * numCities + 0];
+		if (currentCost < minCost)
+		{
+			minCost = currentCost;
+			vector<int> path = solutionsMap[key].path;
+			minPath = path;
+			bestM = m;
+		}
+	}
+
+	minPath.push_back(bestM);
+	minPath.push_back(0);
+	vector<City> bestPath;
+	for (int i = 0; i < minPath.size(); i++)
+	{
+		bestPath.push_back(cities[minPath[i]]);
+	}
+	printf("Cost for this set of %i cities was %f\n", numCities, minCost);
+	return bestPath;
 }
+
 int main(void)
 {
 	float* d_distances;
@@ -285,16 +375,65 @@ double fRand(double fMin, double fMax)
 vector<City> generateCities(int numCities, int gridDimX, int gridDimY)
 {
 	vector<City> cities;
-	int id = 0;
 	for (int i = 0; i < numCities; i++)
 	{
 		City city;
-		city.id = id;
+		city.id = i;
 		city.x = fRand(0, gridDimX);
 		city.y = fRand(0, gridDimY);
 		cities.push_back(city);
-		id++;
 	}
+//	City city0;
+//	city0.id = 0;
+//	city0.x = 323.05;
+//	city0.y = 24.73;
+//	cities.push_back(city0);
+//	City city1;
+//	city1.id = 1;
+//	city1.x = 24.56;
+//	city1.y = 101.00;
+//	cities.push_back(city1);
+//	City city2;
+//	city2.id = 2;
+//	city2.x = 275.87;
+//	city2.y = 44.57;
+//	cities.push_back(city2);
+//	City city3;
+//	city3.id = 3;
+//	city3.x = 114.67;
+//	city3.y = 186.45;
+//	cities.push_back(city3);
+//	City city4;
+//	city4.id = 4;
+//	city4.x = 164.11;
+//	city4.y = 334.44;
+//	cities.push_back(city4);
+//	City city5;
+//	city5.id = 5;
+//	city5.x = 485.90;
+//	city5.y = 401.21;
+//	cities.push_back(city5);
+//	City city6;
+//	city6.id = 6;
+//	city6.x = 333.49;
+//	city6.y = 464.63;
+//	cities.push_back(city6);
+//	City city7;
+//	city7.id = 7;
+//	city7.x = 133.37;
+//	city7.y = 168.05;
+//	cities.push_back(city7);
+//	City city8;
+//	city8.id = 8;
+//	city8.x = 362.79;
+//	city8.y = 255.52;
+//	cities.push_back(city8);
+//	City city9;
+//	city9.id = 9;
+//	city9.x = 378.74;
+//	city9.y = 235.48;
+//	cities.push_back(city9);
+
 	return cities;
 }
 
