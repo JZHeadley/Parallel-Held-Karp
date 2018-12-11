@@ -18,6 +18,8 @@ using std::chrono::duration_cast;
 using std::chrono::milliseconds;
 using namespace std;
 
+#define NUM_THREADS 4000
+
 struct City
 {
 	int id;
@@ -30,11 +32,16 @@ struct Salesman
 	vector<int> minPath;
 };
 
+struct TravelArgs
+{
+	int threadId;
+};
+
 //support as many nodes as possible even though it would take years
 map <long long, Salesman> shortPath;
 double **dMatrix;
-int numThreads;
 mutex m;
+vector<vector<int>> subsets;
 
 double distance(City city1, City city2)
 {
@@ -95,10 +102,9 @@ void genKey(vector<int> &set, int z, long long &key)
 	}
 }
 
-void* parallel(vector<int> currentSet)
+void* parallel(void * id)
 {
-//	TravelArgs *travel = (TravelArgs *)set;
-//	vector<int> currentSet = travel->currentSet;
+	int threadId = *(int *) id;
 	int minM;
 	double minCost;
 	double currentCost;
@@ -107,44 +113,56 @@ void* parallel(vector<int> currentSet)
 	vector<int> setWithoutK;
 	vector<int> mSet;
 	vector<int> setWithoutM;
+	vector<int> currentSet;
 	long long key;
-	int size = currentSet.size();
-	int kSize = size - 1;
+	int instances = subsets.size();
+	int size;
+	int kSize;
 
-	for(int k = 0; k < size; k++) //in order to find C(z,S) we need to find the min C(k,{S}-{k}) for all k
+	int instancesPerTask = (instances + NUM_THREADS) / NUM_THREADS;
+    	int beginIndex = threadId * instancesPerTask;
+	int endIndex = min((threadId + 1) * instancesPerTask, instances);
+
+	for(int i = beginIndex; i < endIndex; i++)
 	{
-		kSet.clear();
-		kSet.push_back(currentSet[k]);
-		setWithoutK.clear();
-		set_difference(currentSet.begin(), currentSet.end(), kSet.begin(), kSet.end(), inserter(setWithoutK, setWithoutK.begin()));
-		minCost = DBL_MAX;
-		minM = 0;
-		for(int m = 0; m < kSize; m++) //find min C(m, S-{k}) + dMatrix[m][k]
-		{	
-			mSet.clear();
-			mSet.push_back(setWithoutK[m]);
-			setWithoutM.clear();	
-			set_difference(setWithoutK.begin(), setWithoutK.end(), mSet.begin(), mSet.end(), inserter(setWithoutM, setWithoutM.begin()));
-			
-			genKey(setWithoutM, setWithoutK[m], key);
-			currentCost = shortPath[key].minCost + dMatrix[setWithoutK[m]][currentSet[k]];
-			if(currentCost < minCost)
-			{
-				minCost = currentCost;
-				minPath = shortPath[key].minPath;
-				minM = m;
+		currentSet = subsets[i];
+		size = currentSet.size();
+		kSize = size - 1;
+		for(int k = 0; k < size; k++) //in order to find C(z,S) we need to find the min C(k,{S}-{k}) for all k
+		{
+			kSet.clear();
+			kSet.push_back(currentSet[k]);
+			setWithoutK.clear();
+			set_difference(currentSet.begin(), currentSet.end(), kSet.begin(), kSet.end(), inserter(setWithoutK, setWithoutK.begin()));
+			minCost = DBL_MAX;
+			minM = 0;
+			for(int m = 0; m < kSize; m++) //find min C(m, S-{k}) + dMatrix[m][k]
+			{	
+				mSet.clear();
+				mSet.push_back(setWithoutK[m]);
+				setWithoutM.clear();	
+				set_difference(setWithoutK.begin(), setWithoutK.end(), mSet.begin(), mSet.end(), inserter(setWithoutM, setWithoutM.begin()));
+
+				genKey(setWithoutM, setWithoutK[m], key);
+				currentCost = shortPath[key].minCost + dMatrix[setWithoutK[m]][currentSet[k]];
+				if(currentCost < minCost)
+				{
+					minCost = currentCost;
+					minPath = shortPath[key].minPath;
+					minM = m;
+				}
 			}
+			//add the path to the min path for this route
+			minPath.push_back(setWithoutK[minM]);
+			// now store the answer for the next iteration 
+			Salesman s;
+			s.minCost = minCost;
+			s.minPath = minPath;
+			genKey(setWithoutK, currentSet[k], key);
+			m.lock();
+			shortPath.insert(pair <long long, Salesman> (key, s));
+			m.unlock();
 		}
-		//add the path to the min path for this route
-		minPath.push_back(setWithoutK[minM]);
-		// now store the answer for the next iteration 
-		Salesman s;
-		s.minCost = minCost;
-		s.minPath = minPath;
-		genKey(setWithoutK, currentSet[k], key);
-		m.lock();
-		shortPath.insert(pair <long long, Salesman> (key, s));
-		m.unlock();
 	}
 	return NULL;
 }
@@ -152,7 +170,7 @@ void* parallel(vector<int> currentSet)
 //unsigned long long maxThreads(int size)
 //{
 //	int maxLayer = ceil((double)size / 2.0);
-	//return binomialCoeff(size - 2, maxLayer - 1)
+//return binomialCoeff(size - 2, maxLayer - 1)
 //}
 
 // Returns value of Binomial Coefficient C(n, k) 
@@ -186,9 +204,13 @@ void travel(int size)
 	vector<int> mSet;
 	vector<int> currentSet;
 	int subsetSize;
-	vector<vector<int>> subsets; 
-	vector<thread> threads;
-	int success;
+	vector<pthread_t> threads;
+	int instancesPerTask;
+	int beginIndex;
+	int endIndex;
+	int *ids = (int *) malloc(NUM_THREADS * sizeof(int));
+	int runs;
+
 
 	if(size == 0)
 	{
@@ -225,14 +247,23 @@ void travel(int size)
 		threads.clear();
 		subsets = generateSubsets(i, size-1);
 		subsetSize = subsets.size();
-		for(int j = 0; j < subsetSize; j++)
+		runs = min(subsetSize, NUM_THREADS); 
+			
+		for(int j = 0; j < runs; j++)
 		{
-			threads.emplace_back(parallel, subsets[j]);
-		}	
+			ids[j] = j;
+		}
 		
-		for(thread & t : threads)
+		for(int j = 0; j < runs; j++)
 		{
-			t.join();
+			pthread_t thread;
+			pthread_create(&thread, NULL, parallel, (void *)&ids[j]);
+			threads.push_back(thread);
+		}
+
+		for(int j = 0; j < runs; j++)
+		{
+			pthread_join(threads[j],NULL);
 		}
 	}
 
@@ -286,7 +317,7 @@ int main(int argc, char* argv[])
 	}
 	int size = cities.size();
 	distanceMatrix(cities);
-	
+
 	time_point<Clock> before = Clock::now();
 	travel(size);
 	time_point<Clock> after = Clock::now();
