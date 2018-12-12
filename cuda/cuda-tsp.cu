@@ -36,7 +36,7 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort =
 void genKey(vector<int> set, int z, long long &key);
 #define DEBUG false
 #define NUM_THREADS 1024
-int numCities = 20;
+int numCities = 16;
 int numFeatures = 3;
 vector<vector<int>> subsets;
 map<long long int, PathCost> solutionsMap;
