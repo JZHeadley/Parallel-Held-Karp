@@ -35,7 +35,7 @@ vector<City> generateCities(int numCities, int gridDimX, int gridDimY);
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort = true);
 void genKey(vector<int> set, int z, long long &key);
 #define DEBUG false
-#define NUM_THREADS 1024
+int NUM_THREADS=1024;
 int numCities = 16;
 int numFeatures = 3;
 vector<vector<int>> subsets;
@@ -288,12 +288,20 @@ vector<City> tsp(vector<City> cities, int numCities, float* distances, float* d_
 	return bestPath;
 }
 
-int main(void)
+int main(int argc, char*argv[])
 {
-	float* d_distances;
+	if (argc < 3) {
+            printf("./cuda-tsp numCities numThreads\n");
+            exit(-1);
+        }
+        else{
+            numCities=atoi(argv[1]);
+            NUM_THREADS=atoi(argv[2]);
+        }
+        float* d_distances;
 	float* h_dataset;
 	float* d_dataset;
-
+        
 	int k = numCities % 2 == 0 ? numCities / 2 : (ceil(numCities / 2));
 
 	cudaEvent_t allStart, allStop, distStart, distStop;
